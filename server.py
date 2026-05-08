@@ -6,12 +6,28 @@ import os
 import json
 import secrets
 from pathlib import Path
+from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 import sync_engine
 
-CRON_LOG = Path(__file__).parent / "cron_log.json"
+CRON_LOG    = Path(__file__).parent / "cron_log.json"
+HISTORY_LOG = Path(__file__).parent / "history.jsonl"
+MAX_HISTORY = 50
+
+
+def append_history(operation: str, result: dict):
+    entry = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "operation": operation,
+        **result,
+    }
+    lines = []
+    if HISTORY_LOG.exists():
+        lines = HISTORY_LOG.read_text().splitlines()
+    lines.append(json.dumps(entry))
+    HISTORY_LOG.write_text("\n".join(lines[-MAX_HISTORY:]) + "\n")
 
 app = FastAPI(title="Jira ↔ Lark Sync")
 security = HTTPBasic()
@@ -53,31 +69,41 @@ def index(credentials: HTTPBasicCredentials = Depends(check_auth)):
 @app.post("/sync/jira-issues-to-lark")
 def ep_jira_issues_to_lark(_=Depends(check_auth)):
     result = sync_engine.sync_jira_issues_to_lark(get_cfg())
-    return result.summary()
+    s = result.summary()
+    append_history("Jira Issues → Lark", s)
+    return s
 
 
 @app.post("/sync/jira-progress-assignee-to-lark")
 def ep_jira_progress_to_lark(_=Depends(check_auth)):
     result = sync_engine.sync_jira_progress_assignee_to_lark(get_cfg())
-    return result.summary()
+    s = result.summary()
+    append_history("Jira Progress & Assignee → Lark", s)
+    return s
 
 
 @app.post("/sync/lark-issues-to-jira")
 def ep_lark_issues_to_jira(_=Depends(check_auth)):
     result = sync_engine.sync_lark_issues_to_jira(get_cfg())
-    return result.summary()
+    s = result.summary()
+    append_history("Lark Issues → Jira", s)
+    return s
 
 
 @app.post("/sync/lark-dates-to-jira")
 def ep_lark_dates_to_jira(_=Depends(check_auth)):
     result = sync_engine.sync_lark_dates_to_jira(get_cfg())
-    return result.summary()
+    s = result.summary()
+    append_history("Lark Dates → Jira", s)
+    return s
 
 
 @app.post("/sync/structure")
 def ep_sync_structure(_=Depends(check_auth)):
     result = sync_engine.sync_structure(get_cfg())
-    return result.summary()
+    s = result.summary()
+    append_history("Sync Structure (Epics & Stories)", s)
+    return s
 
 
 @app.get("/cron/status")
@@ -85,6 +111,20 @@ def cron_status(_=Depends(check_auth)):
     if not CRON_LOG.exists():
         return {"last_run": None, "status": "never", "results": {}}
     return json.loads(CRON_LOG.read_text())
+
+
+@app.get("/history")
+def get_history(_=Depends(check_auth)):
+    if not HISTORY_LOG.exists():
+        return []
+    lines = [l for l in HISTORY_LOG.read_text().splitlines() if l.strip()]
+    entries = []
+    for line in reversed(lines):
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            pass
+    return entries
 
 
 # ── HTML page ─────────────────────────────────────────────────────────────────
@@ -136,6 +176,18 @@ HTML_PAGE = """<!DOCTYPE html>
   .cron-badge.error { background: #fed7d7; color: #c53030; }
   .cron-badge.never { background: #e8eaf0; color: #888; }
   .cron-detail { color: #888; font-size: 12px; line-height: 1.6; }
+  .history-box { margin-top: 12px; padding: 14px 18px; background: #fafafa;
+                 border: 1.5px solid #e8eaf0; border-radius: 10px; font-size: 13px; }
+  .history-header { display: flex; justify-content: space-between; align-items: center;
+                    font-weight: 600; color: #1a1a2e; cursor: pointer; }
+  .history-header:hover { color: #5b6af0; }
+  .history-entry { padding: 10px 0; border-bottom: 1px solid #f0f0f5; font-size: 12px; }
+  .history-entry:last-child { border-bottom: none; }
+  .history-op { font-weight: 600; color: #1a1a2e; margin-bottom: 3px; }
+  .history-ts { color: #aaa; font-size: 11px; margin-bottom: 5px; }
+  .history-counts { display: flex; gap: 12px; flex-wrap: wrap; }
+  .history-count { color: #555; }
+  .history-errors { color: #c53030; margin-top: 4px; font-size: 11px; }
   .spinner { display: none; width: 16px; height: 16px;
              border: 2px solid #e8eaf0; border-top-color: #5b6af0;
              border-radius: 50%; animation: spin 0.7s linear infinite; }
@@ -201,6 +253,14 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     <div class="cron-detail" id="cron-detail">Checking...</div>
   </div>
+
+  <div class="history-box">
+    <div class="history-header" onclick="toggleHistory()">
+      <span>📋 History</span>
+      <span id="history-toggle" style="font-size:12px;color:#aaa">Show ▼</span>
+    </div>
+    <div id="history-panel" style="display:none;margin-top:12px"></div>
+  </div>
 </div>
 
 <script>
@@ -247,6 +307,53 @@ async function loadCronStatus() {
 }
 loadCronStatus();
 
+let historyLoaded = false;
+async function toggleHistory() {
+  const panel = document.getElementById('history-panel');
+  const toggle = document.getElementById('history-toggle');
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    toggle.textContent = 'Hide ▲';
+    if (!historyLoaded) await loadHistory();
+  } else {
+    panel.style.display = 'none';
+    toggle.textContent = 'Show ▼';
+  }
+}
+
+async function loadHistory() {
+  const panel = document.getElementById('history-panel');
+  panel.innerHTML = '<div style="color:#aaa;font-size:12px">Loading...</div>';
+  try {
+    const resp = await apiFetch('/history');
+    const entries = await resp.json();
+    if (!entries.length) {
+      panel.innerHTML = '<div style="color:#aaa;font-size:12px">No history yet.</div>';
+      return;
+    }
+    panel.innerHTML = entries.map(e => {
+      const dt = new Date(e.ts);
+      const ago = Math.round((Date.now()-dt)/60000);
+      const agoStr = ago < 60 ? ago+'m ago' : Math.round(ago/60)+'h ago';
+      const errs = e.errors||[];
+      return \`<div class="history-entry">
+        <div class="history-op">\${e.operation}</div>
+        <div class="history-ts">\${dt.toLocaleString()} · \${agoStr}</div>
+        <div class="history-counts">
+          <span class="history-count">✅ \${e.created} created</span>
+          <span class="history-count">✏️ \${e.updated} updated</span>
+          <span class="history-count">🗑️ \${e.deleted} deleted</span>
+          <span class="history-count">⏭️ \${e.skipped} skipped</span>
+        </div>
+        \${errs.length ? \`<div class="history-errors">⚠️ \${errs.length} error(s): \${errs.slice(0,2).join(', ')}</div>\` : ''}
+      </div>\`;
+    }).join('');
+    historyLoaded = true;
+  } catch(e) {
+    panel.innerHTML = '<div style="color:#c53030;font-size:12px">Failed to load history.</div>';
+  }
+}
+
 async function runSync(btn, endpoint) {
   const btns = document.querySelectorAll('.btn');
   btns.forEach(b => b.classList.add('loading'));
@@ -273,6 +380,11 @@ async function runSync(btn, endpoint) {
       </div>` : ''}
     `;
     resultEl.style.display = 'block';
+    // Refresh history if open
+    if (document.getElementById('history-panel').style.display !== 'none') {
+      historyLoaded = false;
+      await loadHistory();
+    }
   } catch (err) {
     resultEl.className = 'result error';
     resultEl.innerHTML = `❌ ${err.message}`;

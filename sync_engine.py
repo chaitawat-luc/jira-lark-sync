@@ -532,7 +532,9 @@ def sync_structure(cfg: dict) -> SyncResult:
         jk    = _lark_text(rec["fields"].get(F_JIRA_KEY))
 
         if jk:
+            # Already linked — still push Lark data to Jira
             rid_to_jira_key[rid] = jk
+            _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
             result.skipped += 1
             continue
 
@@ -549,6 +551,7 @@ def sync_structure(cfg: dict) -> SyncResult:
                     token, cfg["LARK_BASE_TOKEN"], cfg["LARK_TABLE_ID"], rid,
                     {F_JIRA_KEY: matched,
                      F_JIRA_URL: f"https://{cfg['JIRA_DOMAIN']}/browse/{matched}"})
+                _push_lark_fields_to_jira(cfg, matched, rec, account_ids)
                 result.updated += 1
             except Exception as e:
                 result.errors.append(f"Write key to Lark Epic {rid}: {e}")
@@ -593,6 +596,8 @@ def sync_structure(cfg: dict) -> SyncResult:
                         result.errors.append(f"Move {jk} → {correct_epic_key}: {e}")
                 else:
                     result.skipped += 1
+            # Always push Lark field data to Jira
+            _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
             rid_to_jira_key[rid] = jk
             continue
 
@@ -618,6 +623,7 @@ def sync_structure(cfg: dict) -> SyncResult:
                      F_JIRA_URL: f"https://{cfg['JIRA_DOMAIN']}/browse/{matched}"})
             except Exception as e:
                 result.errors.append(f"Write key to Lark Story {rid}: {e}")
+            _push_lark_fields_to_jira(cfg, matched, rec, account_ids)
             rid_to_jira_key[rid] = matched
         else:
             assignee_lark = _lark_select(rec["fields"].get(F_ASSIGNEE))
@@ -639,6 +645,25 @@ def sync_structure(cfg: dict) -> SyncResult:
                 result.errors.append(f"Create Jira Story for {title!r}: {e}")
 
     return result
+
+
+def _push_lark_fields_to_jira(cfg: dict, jira_key: str, lark_rec: dict, account_ids: dict):
+    """Push Lark-owned fields (title, dates) to a Jira issue."""
+    updates = {}
+    title = _lark_text(lark_rec["fields"].get(F_TITLE))
+    if title:
+        updates["summary"] = title
+    start = _lark_ts_to_jira_date(lark_rec["fields"].get(F_START))
+    if start:
+        updates["customfield_10015"] = start
+    end = _lark_ts_to_jira_date(lark_rec["fields"].get(F_END))
+    if end:
+        updates["duedate"] = end
+    if updates:
+        try:
+            jira_api.update_issue(cfg, jira_key, updates)
+        except Exception:
+            pass  # non-fatal — structure sync already succeeded
 
 
 def _resolve_parent_epic(story_rec: dict, lark_epics: list, rid_to_jira_key: dict):
