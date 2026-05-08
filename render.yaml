@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: jira-lark-sync
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: JIRA_EMAIL
+        sync: false
+      - key: JIRA_TOKEN
+        sync: false
+      - key: JIRA_DOMAIN
+        sync: false
+      - key: JIRA_PROJECT
+        sync: false
+      - key: LARK_APP_ID
+        sync: false
+      - key: LARK_APP_SECRET
+        sync: false
+      - key: LARK_BASE_TOKEN
+        sync: false
+      - key: LARK_TABLE_ID
+        sync: false
+      - key: SYNC_PASSWORD
+        sync: false
+
+  - type: cron
+    name: jira-lark-cron
+    runtime: python
+    schedule: "0 1 * * *"   # 01:00 UTC = 08:00 Bangkok daily
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 cron.py
+    envVars:
+      - key: JIRA_EMAIL
+        sync: false
+      - key: JIRA_TOKEN
+        sync: false
+      - key: JIRA_DOMAIN
+        sync: false
+      - key: JIRA_PROJECT
+        sync: false
+      - key: LARK_APP_ID
+        sync: false
+      - key: LARK_APP_SECRET
+        sync: false
+      - key: LARK_BASE_TOKEN
+        sync: false
+      - key: LARK_TABLE_ID
+        sync: false

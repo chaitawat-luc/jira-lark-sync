@@ -1,0 +1,6 @@
+.env
+sync.log
+__pycache__/
+*.pyc
+.DS_Store
+.gstack/
