@@ -152,12 +152,15 @@ def _lark_token(cfg: dict) -> str:
     return lark_api.get_token(cfg["LARK_APP_ID"], cfg["LARK_APP_SECRET"])
 
 
-# ── Operation 1: Jira Issues → Lark (create/delete) ─────────────────────────
+# ── Operation 1: Jira Issues → Lark (upsert) ─────────────────────────────────
 
 def sync_jira_issues_to_lark(cfg: dict) -> SyncResult:
     """
-    - Jira issue exists, no Lark record → create Lark record
-    - Lark record has Jira Key, but that key no longer exists in Jira → delete Lark record
+    Upsert by Jira Key (stable anchor — title changes don't create duplicates):
+    - Linked pair exists → update Lark with Jira-authoritative fields
+      (assignee, progress). Fill title/dates into Lark if Lark has no value.
+    - Jira issue has no Lark record → create new Lark record
+    - Lark record has Jira Key that no longer exists in Jira → delete Lark record
     """
     result = SyncResult()
     token = _lark_token(cfg)
@@ -165,20 +168,19 @@ def sync_jira_issues_to_lark(cfg: dict) -> SyncResult:
     lark_records = _load_lark(cfg)
     jira_issues  = _load_jira(cfg)
 
-    jira_keys = {i["key"] for i in jira_issues}
+    jira_keys   = {i["key"] for i in jira_issues}
     jira_by_key = {i["key"]: i for i in jira_issues}
 
-    # Index Lark records by Jira Key (only typed records)
+    # Index Lark typed records by Jira Key
     lark_by_jira_key = {}
     for rec in lark_records:
-        t = _lark_select(rec["fields"].get(F_TYPE))
-        if not t:
+        if not _lark_select(rec["fields"].get(F_TYPE)):
             continue
         jk = _lark_text(rec["fields"].get(F_JIRA_KEY))
         if jk:
             lark_by_jira_key[jk] = rec
 
-    # Delete Lark records whose Jira issue no longer exists
+    # ── Delete: Lark records whose Jira issue no longer exists ────────────────
     for jk, rec in lark_by_jira_key.items():
         if jk not in jira_keys:
             try:
@@ -188,35 +190,81 @@ def sync_jira_issues_to_lark(cfg: dict) -> SyncResult:
             except Exception as e:
                 result.errors.append(f"Delete Lark {rec['record_id']}: {e}")
 
-    # Create Lark records for Jira issues not yet in Lark
-    for key in jira_keys:
-        if key in lark_by_jira_key:
-            result.skipped += 1
-            continue
-        issue = jira_by_key[key]
-        jf = issue["fields"]
+    # ── Upsert: update existing + create new ─────────────────────────────────
+    for jira_issue in jira_issues:
+        key = jira_issue["key"]
+        jf  = jira_issue["fields"]
         assignee_name = (jf.get("assignee") or {}).get("displayName")
-        itype = jf["issuetype"]["name"]  # "Epic" or "Story"
-        fields = {
-            F_TITLE:    jf.get("summary", ""),
-            F_JIRA_KEY: key,
-            F_JIRA_URL: f"https://{cfg['JIRA_DOMAIN']}/browse/{key}",
-            F_TYPE:     itype,
-        }
-        if assignee_name and assignee_name in JIRA_TO_LARK_ASSIGNEE:
-            fields[F_ASSIGNEE] = [JIRA_TO_LARK_ASSIGNEE[assignee_name]]
-        start = _jira_date_to_lark_ts(jf.get("customfield_10015"))
-        end   = _jira_date_to_lark_ts(jf.get("duedate"))
-        prog  = _parse_progress(jf.get("customfield_10174"))
-        if start is not None: fields[F_START]    = start
-        if end is not None:   fields[F_END]      = end
-        if prog is not None:  fields[F_PROGRESS] = prog
-        try:
-            lark_api.create_record(token, cfg["LARK_BASE_TOKEN"],
-                                   cfg["LARK_TABLE_ID"], fields)
-            result.created += 1
-        except Exception as e:
-            result.errors.append(f"Create Lark for {key}: {e}")
+        lark_assignee = JIRA_TO_LARK_ASSIGNEE.get(assignee_name) if assignee_name else None
+        jira_title    = jf.get("summary", "")
+        jira_start    = _jira_date_to_lark_ts(jf.get("customfield_10015"))
+        jira_end      = _jira_date_to_lark_ts(jf.get("duedate"))
+        jira_prog     = _parse_progress(jf.get("customfield_10174"))
+
+        if key in lark_by_jira_key:
+            # ── UPDATE existing Lark record ───────────────────────────────────
+            rec     = lark_by_jira_key[key]
+            rid     = rec["record_id"]
+            updates = {}
+
+            # Title: Lark wins if set; if Lark empty → fill from Jira
+            lark_title = _lark_text(rec["fields"].get(F_TITLE))
+            if not lark_title and jira_title:
+                updates[F_TITLE] = jira_title
+
+            # Assignee: Jira wins
+            lark_current_assignee = _lark_select(rec["fields"].get(F_ASSIGNEE))
+            if lark_assignee and lark_assignee != lark_current_assignee:
+                updates[F_ASSIGNEE] = [lark_assignee]
+            elif not lark_assignee and lark_current_assignee:
+                updates[F_ASSIGNEE] = None
+
+            # Progress: Jira wins (only if Jira has a value)
+            if jira_prog is not None:
+                lark_prog = _parse_progress(rec["fields"].get(F_PROGRESS))
+                if jira_prog != lark_prog:
+                    updates[F_PROGRESS] = jira_prog
+
+            # Start/End date: Lark wins if set; if Lark empty → fill from Jira
+            if not rec["fields"].get(F_START) and jira_start:
+                updates[F_START] = jira_start
+            if not rec["fields"].get(F_END) and jira_end:
+                updates[F_END] = jira_end
+
+            # Always keep URL current
+            expected_url = f"https://{cfg['JIRA_DOMAIN']}/browse/{key}"
+            if _lark_text(rec["fields"].get(F_JIRA_URL)) != expected_url:
+                updates[F_JIRA_URL] = expected_url
+
+            if updates:
+                try:
+                    lark_api.update_record(token, cfg["LARK_BASE_TOKEN"],
+                                           cfg["LARK_TABLE_ID"], rid, updates)
+                    result.updated += 1
+                except Exception as e:
+                    result.errors.append(f"Update Lark {rid}: {e}")
+            else:
+                result.skipped += 1
+        else:
+            # ── CREATE new Lark record ────────────────────────────────────────
+            itype  = jf["issuetype"]["name"]
+            fields = {
+                F_TITLE:    jira_title,
+                F_JIRA_KEY: key,
+                F_JIRA_URL: f"https://{cfg['JIRA_DOMAIN']}/browse/{key}",
+                F_TYPE:     itype,
+            }
+            if lark_assignee:
+                fields[F_ASSIGNEE] = [lark_assignee]
+            if jira_start is not None: fields[F_START]    = jira_start
+            if jira_end   is not None: fields[F_END]      = jira_end
+            if jira_prog  is not None: fields[F_PROGRESS] = jira_prog
+            try:
+                lark_api.create_record(token, cfg["LARK_BASE_TOKEN"],
+                                       cfg["LARK_TABLE_ID"], fields)
+                result.created += 1
+            except Exception as e:
+                result.errors.append(f"Create Lark for {key}: {e}")
 
     return result
 
@@ -276,13 +324,14 @@ def sync_jira_progress_assignee_to_lark(cfg: dict) -> SyncResult:
     return result
 
 
-# ── Operation 3: Lark Issues → Jira (create/delete) ─────────────────────────
+# ── Operation 3: Lark Issues → Jira (upsert) ─────────────────────────────────
 
 def sync_lark_issues_to_jira(cfg: dict) -> SyncResult:
     """
-    - Lark record (typed) has no Jira Key → create in Jira + write key back to Lark
-    - Lark record has Jira Key that was manually cleared → (skip, only create new ones)
-    - Jira issue deleted externally → not handled here (use operation 1 for that direction)
+    Upsert by Jira Key (stable anchor — title changes don't create duplicates):
+    - Linked pair exists → push Lark-authoritative fields to Jira
+      (title, start date, end date). Jira is updated to match Lark.
+    - Lark record has no Jira Key → create in Jira + write key back to Lark
     """
     result = SyncResult()
     token = _lark_token(cfg)
@@ -317,8 +366,13 @@ def sync_lark_issues_to_jira(cfg: dict) -> SyncResult:
         title = _lark_text(rec["fields"].get(F_TITLE)) or ""
         jk    = _lark_text(rec["fields"].get(F_JIRA_KEY))
         if jk:
+            # ── UPSERT: push Lark fields to existing Jira issue ───────────────
             lark_id_to_jira_key[rid] = jk
-            result.skipped += 1
+            pushed = _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
+            if pushed:
+                result.updated += 1
+            else:
+                result.skipped += 1
             continue
 
         # Match or create
@@ -379,8 +433,9 @@ def sync_lark_issues_to_jira(cfg: dict) -> SyncResult:
             continue
 
         if jk:
-            # Already linked — check parent
+            # ── UPSERT: push Lark fields + fix parent if needed ───────────────
             story_issue = jira_by_key.get(jk)
+            pushed = _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
             if story_issue:
                 current_parent = (story_issue["fields"].get("parent") or {}).get("key")
                 if current_parent != correct_epic_key:
@@ -389,6 +444,8 @@ def sync_lark_issues_to_jira(cfg: dict) -> SyncResult:
                         result.updated += 1
                     except Exception as e:
                         result.errors.append(f"Move {jk}: {e}")
+                elif pushed:
+                    result.updated += 1
                 else:
                     result.skipped += 1
             lark_id_to_jira_key[rid] = jk
