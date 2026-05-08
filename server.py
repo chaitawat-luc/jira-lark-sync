@@ -336,17 +336,16 @@ async function loadHistory() {
       const ago = Math.round((Date.now()-dt)/60000);
       const agoStr = ago < 60 ? ago+'m ago' : Math.round(ago/60)+'h ago';
       const errs = e.errors||[];
-      return \`<div class="history-entry">
-        <div class="history-op">\${e.operation}</div>
-        <div class="history-ts">\${dt.toLocaleString()} · \${agoStr}</div>
-        <div class="history-counts">
-          <span class="history-count">✅ \${e.created} created</span>
-          <span class="history-count">✏️ \${e.updated} updated</span>
-          <span class="history-count">🗑️ \${e.deleted} deleted</span>
-          <span class="history-count">⏭️ \${e.skipped} skipped</span>
-        </div>
-        \${errs.length ? \`<div class="history-errors">⚠️ \${errs.length} error(s): \${errs.slice(0,2).join(', ')}</div>\` : ''}
-      </div>\`;
+      const errHtml = errs.length ? '<div class="history-errors">⚠️ '+errs.length+' error(s): '+errs.slice(0,2).join(', ')+'</div>' : '';
+      return '<div class="history-entry">'
+        + '<div class="history-op">'+e.operation+'</div>'
+        + '<div class="history-ts">'+dt.toLocaleString()+' · '+agoStr+'</div>'
+        + '<div class="history-counts">'
+        + '<span class="history-count">✅ '+e.created+' created</span>'
+        + '<span class="history-count">✏️ '+e.updated+' updated</span>'
+        + '<span class="history-count">🗑️ '+e.deleted+' deleted</span>'
+        + '<span class="history-count">⏭️ '+e.skipped+' skipped</span>'
+        + '</div>' + errHtml + '</div>';
     }).join('');
     historyLoaded = true;
   } catch(e) {
