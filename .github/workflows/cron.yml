@@ -1,0 +1,32 @@
+name: Daily Sync Cron
+
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 01:00 UTC = 08:00 Bangkok daily
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run cron sync
+        env:
+          JIRA_EMAIL:      ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN:      ${{ secrets.JIRA_TOKEN }}
+          JIRA_DOMAIN:     ${{ secrets.JIRA_DOMAIN }}
+          JIRA_PROJECT:    ${{ secrets.JIRA_PROJECT }}
+          LARK_APP_ID:     ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_TOKEN: ${{ secrets.LARK_BASE_TOKEN }}
+          LARK_TABLE_ID:   ${{ secrets.LARK_TABLE_ID }}
+        run: python3 cron.py
