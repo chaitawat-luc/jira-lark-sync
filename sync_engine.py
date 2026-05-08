@@ -110,9 +110,11 @@ def _lark_text(field_val) -> "str | None":
 
 
 def _lark_select(field_val) -> "str | None":
-    """Lark select fields return as {id, text} or list."""
+    """Lark select fields return as plain string, {id, text} dict, or list."""
     if field_val is None:
         return None
+    if isinstance(field_val, str):
+        return field_val or None
     if isinstance(field_val, dict):
         return field_val.get("text") or field_val.get("name")
     if isinstance(field_val, list) and field_val:
@@ -202,7 +204,7 @@ def sync_jira_issues_to_lark(cfg: dict) -> SyncResult:
             F_TYPE:     itype,
         }
         if assignee_name and assignee_name in JIRA_TO_LARK_ASSIGNEE:
-            fields[F_ASSIGNEE] = {"text": JIRA_TO_LARK_ASSIGNEE[assignee_name]}
+            fields[F_ASSIGNEE] = [JIRA_TO_LARK_ASSIGNEE[assignee_name]]
         start = _jira_date_to_lark_ts(jf.get("customfield_10015"))
         end   = _jira_date_to_lark_ts(jf.get("duedate"))
         prog  = _parse_progress(jf.get("customfield_10174"))
@@ -257,7 +259,7 @@ def sync_jira_progress_assignee_to_lark(cfg: dict) -> SyncResult:
         lark_current = _lark_select(rec["fields"].get(F_ASSIGNEE))
         if lark_target != lark_current:
             if lark_target:
-                updates[F_ASSIGNEE] = {"text": lark_target}
+                updates[F_ASSIGNEE] = [lark_target]
             else:
                 updates[F_ASSIGNEE] = None
 
