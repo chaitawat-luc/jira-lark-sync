@@ -532,10 +532,13 @@ def sync_structure(cfg: dict) -> SyncResult:
         jk    = _lark_text(rec["fields"].get(F_JIRA_KEY))
 
         if jk:
-            # Already linked — still push Lark data to Jira
+            # Already linked — push Lark data to Jira and count correctly
             rid_to_jira_key[rid] = jk
-            _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
-            result.skipped += 1
+            pushed = _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
+            if pushed:
+                result.updated += 1
+            else:
+                result.skipped += 1
             continue
 
         matched = jira_epic_sums.get(_norm(title))
@@ -595,8 +598,14 @@ def sync_structure(cfg: dict) -> SyncResult:
                     except Exception as e:
                         result.errors.append(f"Move {jk} → {correct_epic_key}: {e}")
                 else:
-                    result.skipped += 1
-            # Always push Lark field data to Jira
+                    pushed = _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
+                    if pushed:
+                        result.updated += 1
+                    else:
+                        result.skipped += 1
+                    rid_to_jira_key[rid] = jk
+                    continue
+            # Always push Lark field data to Jira (when parent was moved)
             _push_lark_fields_to_jira(cfg, jk, rec, account_ids)
             rid_to_jira_key[rid] = jk
             continue
@@ -623,7 +632,9 @@ def sync_structure(cfg: dict) -> SyncResult:
                      F_JIRA_URL: f"https://{cfg['JIRA_DOMAIN']}/browse/{matched}"})
             except Exception as e:
                 result.errors.append(f"Write key to Lark Story {rid}: {e}")
-            _push_lark_fields_to_jira(cfg, matched, rec, account_ids)
+            pushed = _push_lark_fields_to_jira(cfg, matched, rec, account_ids)
+            if pushed and current_parent == correct_epic_key:
+                result.updated += 1
             rid_to_jira_key[rid] = matched
         else:
             assignee_lark = _lark_select(rec["fields"].get(F_ASSIGNEE))
@@ -647,8 +658,8 @@ def sync_structure(cfg: dict) -> SyncResult:
     return result
 
 
-def _push_lark_fields_to_jira(cfg: dict, jira_key: str, lark_rec: dict, account_ids: dict):
-    """Push Lark-owned fields (title, dates) to a Jira issue."""
+def _push_lark_fields_to_jira(cfg: dict, jira_key: str, lark_rec: dict, account_ids: dict) -> bool:
+    """Push Lark-owned fields (title, dates) to a Jira issue. Returns True if any update was sent."""
     updates = {}
     title = _lark_text(lark_rec["fields"].get(F_TITLE))
     if title:
@@ -662,8 +673,10 @@ def _push_lark_fields_to_jira(cfg: dict, jira_key: str, lark_rec: dict, account_
     if updates:
         try:
             jira_api.update_issue(cfg, jira_key, updates)
+            return True
         except Exception:
-            pass  # non-fatal — structure sync already succeeded
+            pass
+    return False
 
 
 def _resolve_parent_epic(story_rec: dict, lark_epics: list, rid_to_jira_key: dict):
